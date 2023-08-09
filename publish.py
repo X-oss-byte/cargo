@@ -26,7 +26,9 @@ TO_PUBLISH = [
 
 def already_published(name, version):
     try:
-        urllib.request.urlopen('https://crates.io/api/v1/crates/%s/%s/download' % (name, version))
+        urllib.request.urlopen(
+            f'https://crates.io/api/v1/crates/{name}/{version}/download'
+        )
     except HTTPError as e:
         if e.code == 404:
             return False
@@ -36,10 +38,10 @@ def already_published(name, version):
 
 def maybe_publish(path):
     content = open(os.path.join(path, 'Cargo.toml')).read()
-    name = re.search('^name = "([^"]+)"', content, re.M).group(1)
-    version = re.search('^version = "([^"]+)"', content, re.M).group(1)
+    name = re.search('^name = "([^"]+)"', content, re.M)[1]
+    version = re.search('^version = "([^"]+)"', content, re.M)[1]
     if already_published(name, version):
-        print('%s %s is already published, skipping' % (name, version))
+        print(f'{name} {version} is already published, skipping')
         return False
     subprocess.check_call(['cargo', 'publish', '--no-verify'], cwd=path)
     return True
