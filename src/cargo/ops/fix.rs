@@ -243,22 +243,26 @@ fn check_resolver_change(ws: &Workspace<'_>, opts: &FixOptions) -> CargoResult<(
     // 2018 without `resolver` set must be V1
     assert_eq!(ws.resolve_behavior(), ResolveBehavior::V1);
     let specs = opts.compile_opts.spec.to_package_id_specs(ws)?;
-    let target_data = RustcTargetData::new(ws, &opts.compile_opts.build_config.requested_kinds)?;
-    let resolve_differences = |has_dev_units| -> CargoResult<(WorkspaceResolve<'_>, DiffMap)> {
+    let mut target_data =
+        RustcTargetData::new(ws, &opts.compile_opts.build_config.requested_kinds)?;
+    let mut resolve_differences = |has_dev_units| -> CargoResult<(WorkspaceResolve<'_>, DiffMap)> {
+        let max_rust_version = ws.rust_version();
+
         let ws_resolve = ops::resolve_ws_with_opts(
             ws,
-            &target_data,
+            &mut target_data,
             &opts.compile_opts.build_config.requested_kinds,
             &opts.compile_opts.cli_features,
             &specs,
             has_dev_units,
             crate::core::resolver::features::ForceAllTargets::No,
+            max_rust_version,
         )?;
 
         let feature_opts = FeatureOpts::new_behavior(ResolveBehavior::V2, has_dev_units);
         let v2_features = FeatureResolver::resolve(
             ws,
-            &target_data,
+            &mut target_data,
             &ws_resolve.targeted_resolve,
             &ws_resolve.pkg_set,
             &opts.compile_opts.cli_features,

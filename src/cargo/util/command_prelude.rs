@@ -4,6 +4,7 @@ use crate::core::{Edition, Workspace};
 use crate::ops::{CompileFilter, CompileOptions, NewOptions, Packages, VersionControl};
 use crate::util::important_paths::find_root_manifest_for_wd;
 use crate::util::interning::InternedString;
+use crate::util::is_rustup;
 use crate::util::restricted_names::is_glob_pattern;
 use crate::util::toml::{StringOrVec, TomlProfile};
 use crate::util::validate_package_name;
@@ -14,6 +15,7 @@ use crate::util::{
 use crate::CargoResult;
 use anyhow::bail;
 use cargo_util::paths;
+use clap::builder::UnknownArgumentValueParser;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::path::PathBuf;
@@ -82,6 +84,16 @@ pub trait CommandExt: Sized {
         )
     }
 
+    fn arg_parallel(self) -> Self {
+        self.arg_jobs()._arg(
+            flag(
+                "keep-going",
+                "Do not abort the build as soon as there is an error",
+            )
+            .help_heading(heading::COMPILATION_OPTIONS),
+        )
+    }
+
     fn arg_jobs(self) -> Self {
         self._arg(
             opt("jobs", "Number of parallel jobs, defaults to # of CPUs.")
@@ -90,13 +102,12 @@ pub trait CommandExt: Sized {
                 .allow_hyphen_values(true)
                 .help_heading(heading::COMPILATION_OPTIONS),
         )
-        ._arg(
-            flag(
-                "keep-going",
-                "Do not abort the build as soon as there is an error (unstable)",
-            )
-            .help_heading(heading::COMPILATION_OPTIONS),
-        )
+    }
+
+    fn arg_unsupported_keep_going(self) -> Self {
+        let msg = "use `--no-fail-fast` to run as many tests as possible regardless of failure";
+        let value_parser = UnknownArgumentValueParser::suggest(msg);
+        self._arg(flag("keep-going", "").value_parser(value_parser).hide(true))
     }
 
     fn arg_targets_all(
@@ -208,7 +219,10 @@ pub trait CommandExt: Sized {
     }
 
     fn arg_target_triple(self, target: &'static str) -> Self {
-        self._arg(multi_opt("target", "TRIPLE", target).help_heading(heading::COMPILATION_OPTIONS))
+        self._arg(
+            optional_multi_opt("target", "TRIPLE", target)
+                .help_heading(heading::COMPILATION_OPTIONS),
+        )
     }
 
     fn arg_target_dir(self) -> Self {
@@ -250,8 +264,7 @@ pub trait CommandExt: Sized {
             opt(
                 "vcs",
                 "Initialize a new repository for the given version \
-                 control system (git, hg, pijul, or fossil) or do not \
-                 initialize any version control at all (none), overriding \
+                 control system, overriding \
                  a global configuration.",
             )
             .value_name("VCS")
@@ -428,11 +441,23 @@ pub trait ArgMatchesExt {
     }
 
     fn keep_going(&self) -> bool {
-        self.flag("keep-going")
+        self.maybe_flag("keep-going")
     }
 
-    fn targets(&self) -> Vec<String> {
-        self._values_of("target")
+    fn targets(&self) -> CargoResult<Vec<String>> {
+        if self.is_present_with_zero_values("target") {
+            let cmd = if is_rustup() {
+                "rustup target list"
+            } else {
+                "rustc --print target-list"
+            };
+            bail!(
+                "\"--target\" takes a target architecture as an argument.
+
+Run `{cmd}` to see possible targets."
+            );
+        }
+        Ok(self._values_of("target"))
     }
 
     fn get_profile_name(
@@ -581,7 +606,7 @@ pub trait ArgMatchesExt {
             config,
             self.jobs()?,
             self.keep_going(),
-            &self.targets(),
+            &self.targets()?,
             mode,
         )?;
         build_config.message_format = message_format.unwrap_or(MessageFormat::Human);
@@ -617,11 +642,6 @@ pub trait ArgMatchesExt {
             }
         }
 
-        if build_config.keep_going {
-            config
-                .cli_unstable()
-                .fail_if_stable_opt("--keep-going", 10496)?;
-        }
         if build_config.build_plan {
             config
                 .cli_unstable()
@@ -774,6 +794,8 @@ pub trait ArgMatchesExt {
 
     fn flag(&self, name: &str) -> bool;
 
+    fn maybe_flag(&self, name: &str) -> bool;
+
     fn _value_of(&self, name: &str) -> Option<&str>;
 
     fn _values_of(&self, name: &str) -> Vec<String>;
@@ -792,6 +814,17 @@ impl<'a> ArgMatchesExt for ArgMatches {
         ignore_unknown(self.try_get_one::<bool>(name))
             .copied()
             .unwrap_or(false)
+    }
+
+    // This works around before an upstream fix in clap for `UnknownArgumentValueParser` accepting
+    // generics arguments. `flag()` cannot be used with `--keep-going` at this moment due to
+    // <https://github.com/clap-rs/clap/issues/5081>.
+    fn maybe_flag(&self, name: &str) -> bool {
+        self.try_get_one::<bool>(name)
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or_default()
     }
 
     fn _value_of(&self, name: &str) -> Option<&str> {

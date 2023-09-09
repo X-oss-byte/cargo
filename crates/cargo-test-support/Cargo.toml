@@ -1,6 +1,7 @@
 [package]
 name = "cargo-test-support"
 version = "0.1.0"
+rust-version.workspace = true
 license.workspace = true
 edition.workspace = true
 publish = false
@@ -18,7 +19,6 @@ flate2.workspace = true
 git2.workspace = true
 glob.workspace = true
 itertools.workspace = true
-lazy_static.workspace = true
 pasetors.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

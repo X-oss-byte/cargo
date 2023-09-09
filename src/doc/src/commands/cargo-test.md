@@ -1,8 +1,5 @@
 # cargo-test(1)
 
-
-
-
 ## NAME
 
 cargo-test --- Execute unit and integration tests of a package
@@ -515,12 +512,6 @@ a string <code>default</code> is provided, it sets the value back to defaults.
 Should not be 0.</dd>
 
 
-<dt class="option-term" id="option-cargo-test---keep-going"><a class="option-anchor" href="#option-cargo-test---keep-going"></a><code>--keep-going</code></dt>
-<dd class="option-desc">Build as many crates in the dependency graph as possible, rather than aborting
-the build on the first one that fails to build. Unstable, requires
-<code>-Zunstable-options</code>.</dd>
-
-
 <dt class="option-term" id="option-cargo-test---future-incompat-report"><a class="option-anchor" href="#option-cargo-test---future-incompat-report"></a><code>--future-incompat-report</code></dt>
 <dd class="option-desc">Displays a future-incompat report for any future-incompatible warnings
 produced during execution of this command</p>
@@ -529,6 +520,14 @@ produced during execution of this command</p>
 
 
 </dl>
+
+While `cargo test` involves compilation, it does not provide a `--keep-going`
+flag. Use `--no-fail-fast` to run as many tests as possible without stopping at
+the first failure. To "compile" as many tests as possible, use `--tests` to
+build test binaries separately. For example:
+
+    cargo build --tests --keep-going
+    cargo test --tests --no-fail-fast
 
 ## ENVIRONMENT
 

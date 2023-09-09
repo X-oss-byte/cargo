@@ -135,7 +135,7 @@ pub fn configure_http_handle(config: &Config, handle: &mut Easy) -> CargoResult<
 
     if let Some(true) = http.debug {
         handle.verbose(true)?;
-        tracing::debug!("{:#?}", curl::Version::get());
+        tracing::debug!(target: "network", "{:#?}", curl::Version::get());
         handle.debug_function(|kind, data| {
             enum LogLevel {
                 Debug,
@@ -152,6 +152,8 @@ pub fn configure_http_handle(config: &Config, handle: &mut Easy) -> CargoResult<
                 _ => return,
             };
             let starts_with_ignore_case = |line: &str, text: &str| -> bool {
+                let line = line.as_bytes();
+                let text = text.as_bytes();
                 line[..line.len().min(text.len())].eq_ignore_ascii_case(text)
             };
             match str::from_utf8(data) {
@@ -165,16 +167,20 @@ pub fn configure_http_handle(config: &Config, handle: &mut Easy) -> CargoResult<
                             line = "set-cookie: [REDACTED]";
                         }
                         match level {
-                            Debug => debug!("http-debug: {prefix} {line}"),
-                            Trace => trace!("http-debug: {prefix} {line}"),
+                            Debug => debug!(target: "network", "http-debug: {prefix} {line}"),
+                            Trace => trace!(target: "network", "http-debug: {prefix} {line}"),
                         }
                     }
                 }
                 Err(_) => {
                     let len = data.len();
                     match level {
-                        Debug => debug!("http-debug: {prefix} ({len} bytes of data)"),
-                        Trace => trace!("http-debug: {prefix} ({len} bytes of data)"),
+                        Debug => {
+                            debug!(target: "network", "http-debug: {prefix} ({len} bytes of data)")
+                        }
+                        Trace => {
+                            trace!(target: "network", "http-debug: {prefix} ({len} bytes of data)")
+                        }
                     }
                 }
             }

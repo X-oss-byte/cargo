@@ -252,7 +252,7 @@ fn rustc(cx: &mut Context<'_, '_>, unit: &Unit, exec: &Arc<dyn Executor>) -> Car
     let mut rustc = prepare_rustc(cx, unit)?;
     let build_plan = cx.bcx.build_config.build_plan;
 
-    let name = unit.pkg.name().to_string();
+    let name = unit.pkg.name();
     let buildkey = unit.buildkey();
 
     let outputs = cx.outputs(unit)?;
@@ -634,19 +634,9 @@ where
 {
     let mut search_path = vec![];
     for dir in paths {
-        let dir = match dir.to_str() {
-            Some(s) => {
-                let mut parts = s.splitn(2, '=');
-                match (parts.next(), parts.next()) {
-                    (Some("native"), Some(path))
-                    | (Some("crate"), Some(path))
-                    | (Some("dependency"), Some(path))
-                    | (Some("framework"), Some(path))
-                    | (Some("all"), Some(path)) => path.into(),
-                    _ => dir.clone(),
-                }
-            }
-            None => dir.clone(),
+        let dir = match dir.to_str().and_then(|s| s.split_once("=")) {
+            Some(("native" | "crate" | "dependency" | "framework" | "all", path)) => path.into(),
+            _ => dir.clone(),
         };
         if dir.starts_with(&root_output) {
             search_path.push(dir);
@@ -785,7 +775,7 @@ fn rustdoc(cx: &mut Context<'_, '_>, unit: &Unit) -> CargoResult<Work> {
     paths::create_dir_all(&doc_dir)?;
 
     let target_desc = unit.target.description_named();
-    let name = unit.pkg.name().to_string();
+    let name = unit.pkg.name();
     let build_script_outputs = Arc::clone(&cx.build_script_outputs);
     let package_id = unit.pkg.package_id();
     let manifest_path = PathBuf::from(unit.pkg.manifest_path());
@@ -1117,7 +1107,10 @@ fn build_base_args(cx: &Context<'_, '_>, cmd: &mut ProcessBuilder, unit: &Unit) 
         cmd,
         "-C",
         "linker=",
-        bcx.linker(unit.kind).as_ref().map(|s| s.as_ref()),
+        cx.compilation
+            .target_linker(unit.kind)
+            .as_ref()
+            .map(|s| s.as_ref()),
     );
     if incremental {
         let dir = cx.files().layout(unit.kind).incremental().as_os_str();

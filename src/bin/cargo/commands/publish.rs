@@ -20,7 +20,7 @@ pub fn cli() -> Command {
         .arg_quiet()
         .arg_package("Package to publish")
         .arg_features()
-        .arg_jobs()
+        .arg_parallel()
         .arg_target_triple("Build for the target triple")
         .arg_target_dir()
         .arg_manifest_path()
@@ -50,7 +50,7 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
             verify: !args.flag("no-verify"),
             allow_dirty: args.flag("allow-dirty"),
             to_publish: args.packages_from_flags()?,
-            targets: args.targets(),
+            targets: args.targets()?,
             jobs: args.jobs()?,
             keep_going: args.keep_going(),
             dry_run: args.dry_run(),

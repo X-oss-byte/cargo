@@ -74,11 +74,22 @@ impl RegistryConfigExtended {
 }
 
 /// Get the list of credential providers for a registry source.
-fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<String>>> {
+fn credential_provider(
+    config: &Config,
+    sid: &SourceId,
+    show_warnings: bool,
+) -> CargoResult<Vec<Vec<String>>> {
+    let warn = |message: String| {
+        if show_warnings {
+            config.shell().warn(message)
+        } else {
+            Ok(())
+        }
+    };
+
     let cfg = registry_credential_config_raw(config, sid)?;
-    let allow_cred_proc = config.cli_unstable().credential_process;
     let default_providers = || {
-        if allow_cred_proc {
+        if config.cli_unstable().asymmetric_token {
             // Enable the PASETO provider
             vec![
                 vec!["cargo:token".to_string()],
@@ -90,7 +101,7 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
     };
     let global_providers = config
         .get::<Option<Vec<Value<String>>>>("registry.global-credential-providers")?
-        .filter(|p| !p.is_empty() && allow_cred_proc)
+        .filter(|p| !p.is_empty() && config.cli_unstable().credential_process)
         .map(|p| {
             p.iter()
                 .rev()
@@ -99,6 +110,7 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
                 .collect()
         })
         .unwrap_or_else(default_providers);
+    tracing::debug!(?global_providers);
 
     let providers = match cfg {
         // If there's a specific provider configured for this registry, use it.
@@ -107,22 +119,27 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
             token,
             secret_key,
             ..
-        }) if allow_cred_proc => {
+        }) if config.cli_unstable().credential_process => {
+            let provider = resolve_credential_alias(config, provider);
             if let Some(token) = token {
-                config.shell().warn(format!(
-                    "{sid} has a token configured in {} that will be ignored \
-                    because a credential-provider is configured for this registry`",
-                    token.definition
-                ))?;
+                if provider[0] != "cargo:token" {
+                    warn(format!(
+                        "{sid} has a token configured in {} that will be ignored \
+                        because this registry is configured to use credential-provider `{}`",
+                        token.definition, provider[0],
+                    ))?;
+                }
             }
             if let Some(secret_key) = secret_key {
-                config.shell().warn(format!(
-                    "{sid} has a secret-key configured in {} that will be ignored \
-                    because a credential-provider is configured for this registry`",
-                    secret_key.definition
-                ))?;
+                if provider[0] != "cargo:paseto" {
+                    warn(format!(
+                        "{sid} has a secret-key configured in {} that will be ignored \
+                        because this registry is configured to use credential-provider `{}`",
+                        secret_key.definition, provider[0],
+                    ))?;
+                }
             }
-            vec![resolve_credential_alias(config, provider)]
+            vec![provider]
         }
 
         // Warning for both `token` and `secret-key`, stating which will be ignored
@@ -130,7 +147,7 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
             token: Some(token),
             secret_key: Some(secret_key),
             ..
-        }) if allow_cred_proc => {
+        }) if config.cli_unstable().asymmetric_token => {
             let token_pos = global_providers
                 .iter()
                 .position(|p| p.first().map(String::as_str) == Some("cargo:token"));
@@ -140,14 +157,14 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
             match (token_pos, paseto_pos) {
                 (Some(token_pos), Some(paseto_pos)) => {
                     if token_pos < paseto_pos {
-                        config.shell().warn(format!(
+                        warn(format!(
                             "{sid} has a `secret_key` configured in {} that will be ignored \
                         because a `token` is also configured, and the `cargo:token` provider is \
                         configured with higher precedence",
                             secret_key.definition
                         ))?;
                     } else {
-                        config.shell().warn(format!("{sid} has a `token` configured in {} that will be ignored \
+                        warn(format!("{sid} has a `token` configured in {} that will be ignored \
                         because a `secret_key` is also configured, and the `cargo:paseto` provider is \
                         configured with higher precedence", token.definition))?;
                     }
@@ -167,7 +184,7 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
                 .iter()
                 .any(|p| p.first().map(String::as_str) == Some("cargo:token"))
             {
-                config.shell().warn(format!(
+                warn(format!(
                     "{sid} has a token configured in {} that will be ignored \
                     because the `cargo:token` credential provider is not listed in \
                     `registry.global-credential-providers`",
@@ -181,12 +198,12 @@ fn credential_provider(config: &Config, sid: &SourceId) -> CargoResult<Vec<Vec<S
         Some(RegistryConfig {
             secret_key: Some(token),
             ..
-        }) if allow_cred_proc => {
+        }) if config.cli_unstable().asymmetric_token => {
             if !global_providers
                 .iter()
                 .any(|p| p.first().map(String::as_str) == Some("cargo:paseto"))
             {
-                config.shell().warn(format!(
+                warn(format!(
                     "{sid} has a secret-key configured in {} that will be ignored \
                     because the `cargo:paseto` credential provider is not listed in \
                     `registry.global-credential-providers`",
@@ -355,14 +372,40 @@ impl fmt::Display for AuthorizationErrorReason {
 #[derive(Debug)]
 pub struct AuthorizationError {
     /// Url that was attempted
-    pub sid: SourceId,
+    sid: SourceId,
     /// The `registry.default` config value.
-    pub default_registry: Option<String>,
+    default_registry: Option<String>,
     /// Url where the user could log in.
     pub login_url: Option<Url>,
     /// Specific reason indicating what failed
-    pub reason: AuthorizationErrorReason,
+    reason: AuthorizationErrorReason,
+    /// Should the _TOKEN environment variable name be included when displaying this error?
+    display_token_env_help: bool,
 }
+
+impl AuthorizationError {
+    pub fn new(
+        config: &Config,
+        sid: SourceId,
+        login_url: Option<Url>,
+        reason: AuthorizationErrorReason,
+    ) -> CargoResult<Self> {
+        // Only display the _TOKEN environment variable suggestion if the `cargo:token` credential
+        // provider is available for the source. Otherwise setting the environment variable will
+        // have no effect.
+        let display_token_env_help = credential_provider(config, &sid, false)?
+            .iter()
+            .any(|p| p.first().map(String::as_str) == Some("cargo:token"));
+        Ok(AuthorizationError {
+            sid,
+            default_registry: config.default_registry()?,
+            login_url,
+            reason,
+            display_token_env_help,
+        })
+    }
+}
+
 impl Error for AuthorizationError {}
 impl fmt::Display for AuthorizationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -372,20 +415,23 @@ impl fmt::Display for AuthorizationError {
             } else {
                 ""
             };
-            write!(
-                f,
-                "{}, please run `cargo login{args}`\nor use environment variable CARGO_REGISTRY_TOKEN",
-                self.reason
-            )
+            write!(f, "{}, please run `cargo login{args}`", self.reason)?;
+            if self.display_token_env_help {
+                write!(f, "\nor use environment variable CARGO_REGISTRY_TOKEN")?;
+            }
+            Ok(())
         } else if let Some(name) = self.sid.alt_registry_key() {
             let key = ConfigKey::from_str(&format!("registries.{name}.token"));
             write!(
                 f,
-                "{} for `{}`, please run `cargo login --registry {name}`\nor use environment variable {}",
+                "{} for `{}`, please run `cargo login --registry {name}`",
                 self.reason,
                 self.sid.display_registry_name(),
-                key.as_env_key(),
-            )
+            )?;
+            if self.display_token_env_help {
+                write!(f, "\nor use environment variable {}", key.as_env_key())?;
+            }
+            Ok(())
         } else if self.reason == AuthorizationErrorReason::TokenMissing {
             write!(
                 f,
@@ -411,7 +457,7 @@ my-registry = {{ index = "{}" }}
     }
 }
 
-// Store a token in the cache for future calls.
+/// Store a token in the cache for future calls.
 pub fn cache_token_from_commandline(config: &Config, sid: &SourceId, token: Secret<&str>) {
     let url = sid.canonical_url();
     config.credential_cache().insert(
@@ -429,6 +475,7 @@ fn credential_action(
     sid: &SourceId,
     action: Action<'_>,
     headers: Vec<String>,
+    args: &[&str],
 ) -> CargoResult<CredentialResponse> {
     let name = if sid.is_crates_io() {
         Some(CRATES_IO_REGISTRY)
@@ -440,18 +487,26 @@ fn credential_action(
         name,
         headers,
     };
-    let providers = credential_provider(config, sid)?;
+    let providers = credential_provider(config, sid, true)?;
+    let mut any_not_found = false;
     for provider in providers {
-        let args: Vec<&str> = provider.iter().map(String::as_str).collect();
+        let args: Vec<&str> = provider
+            .iter()
+            .map(String::as_str)
+            .chain(args.iter().map(|s| *s))
+            .collect();
         let process = args[0];
         tracing::debug!("attempting credential provider: {args:?}");
         let provider: Box<dyn Credential> = match process {
             "cargo:token" => Box::new(TokenCredential::new(config)),
-            "cargo:paseto" => Box::new(PasetoCredential::new(config)),
-            "cargo:basic" => Box::new(BasicProcessCredential {}),
-            "cargo:1password" => Box::new(cargo_credential_1password::OnePasswordCredential {}),
+            "cargo:paseto" if config.cli_unstable().asymmetric_token => {
+                Box::new(PasetoCredential::new(config))
+            }
+            "cargo:paseto" => bail!("cargo:paseto requires -Zasymmetric-token"),
+            "cargo:token-from-stdout" => Box::new(BasicProcessCredential {}),
             "cargo:wincred" => Box::new(cargo_credential_wincred::WindowsCredential {}),
             "cargo:macos-keychain" => Box::new(cargo_credential_macos_keychain::MacKeychain {}),
+            "cargo:libsecret" => Box::new(cargo_credential_libsecret::LibSecretCredential {}),
             process => Box::new(CredentialProcessCredential::new(process)),
         };
         config.shell().verbose(|c| {
@@ -466,8 +521,8 @@ fn credential_action(
         })?;
         match provider.perform(&registry, &action, &args[1..]) {
             Ok(response) => return Ok(response),
-            Err(cargo_credential::Error::UrlNotSupported)
-            | Err(cargo_credential::Error::NotFound) => {}
+            Err(cargo_credential::Error::UrlNotSupported) => {}
+            Err(cargo_credential::Error::NotFound) => any_not_found = true,
             e => {
                 return e.with_context(|| {
                     format!(
@@ -478,7 +533,11 @@ fn credential_action(
             }
         }
     }
-    Err(cargo_credential::Error::NotFound.into())
+    if any_not_found {
+        Err(cargo_credential::Error::NotFound.into())
+    } else {
+        anyhow::bail!("no credential providers could handle the request")
+    }
 }
 
 /// Returns the token to use for the given registry.
@@ -493,12 +552,12 @@ pub fn auth_token(
 ) -> CargoResult<String> {
     match auth_token_optional(config, sid, operation, headers)? {
         Some(token) => Ok(token.expose()),
-        None => Err(AuthorizationError {
-            sid: sid.clone(),
-            default_registry: config.default_registry()?,
-            login_url: login_url.cloned(),
-            reason: AuthorizationErrorReason::TokenMissing,
-        }
+        None => Err(AuthorizationError::new(
+            config,
+            *sid,
+            login_url.cloned(),
+            AuthorizationErrorReason::TokenMissing,
+        )?
         .into()),
     }
 }
@@ -529,7 +588,7 @@ fn auth_token_optional(
         }
     }
 
-    let credential_response = credential_action(config, sid, Action::Get(operation), headers);
+    let credential_response = credential_action(config, sid, Action::Get(operation), headers, &[]);
     if let Some(e) = credential_response.as_ref().err() {
         if let Some(e) = e.downcast_ref::<cargo_credential::Error>() {
             if matches!(e, cargo_credential::Error::NotFound) {
@@ -550,7 +609,7 @@ fn auth_token_optional(
     let token = Secret::from(token);
     tracing::trace!("found token");
     let expiration = match cache_control {
-        CacheControl::Expires(expiration) => Some(expiration),
+        CacheControl::Expires { expiration } => Some(expiration),
         CacheControl::Session => None,
         CacheControl::Never | _ => return Ok(Some(token)),
     };
@@ -568,7 +627,7 @@ fn auth_token_optional(
 
 /// Log out from the given registry.
 pub fn logout(config: &Config, sid: &SourceId) -> CargoResult<()> {
-    let credential_response = credential_action(config, sid, Action::Logout, vec![]);
+    let credential_response = credential_action(config, sid, Action::Logout, vec![], &[]);
     if let Some(e) = credential_response.as_ref().err() {
         if let Some(e) = e.downcast_ref::<cargo_credential::Error>() {
             if matches!(e, cargo_credential::Error::NotFound) {
@@ -591,8 +650,13 @@ pub fn logout(config: &Config, sid: &SourceId) -> CargoResult<()> {
 }
 
 /// Log in to the given registry.
-pub fn login(config: &Config, sid: &SourceId, options: LoginOptions<'_>) -> CargoResult<()> {
-    let credential_response = credential_action(config, sid, Action::Login(options), vec![])?;
+pub fn login(
+    config: &Config,
+    sid: &SourceId,
+    options: LoginOptions<'_>,
+    args: &[&str],
+) -> CargoResult<()> {
+    let credential_response = credential_action(config, sid, Action::Login(options), vec![], args)?;
     let CredentialResponse::Login = credential_response else {
         bail!("credential provider produced unexpected response for `login` request: {credential_response:?}")
     };

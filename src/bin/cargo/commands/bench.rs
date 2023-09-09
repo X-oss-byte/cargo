@@ -43,6 +43,7 @@ pub fn cli() -> Command {
         )
         .arg_features()
         .arg_jobs()
+        .arg_unsupported_keep_going()
         .arg_profile("Build artifacts with the specified profile")
         .arg_target_triple("Build for the target triple")
         .arg_target_dir()
@@ -54,6 +55,7 @@ pub fn cli() -> Command {
 
 pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     let ws = args.workspace(config)?;
+
     let mut compile_opts = args.compile_options(
         config,
         CompileMode::Bench,

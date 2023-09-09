@@ -85,13 +85,13 @@
 //! [`RemoteRegistry`]: super::remote::RemoteRegistry
 //! [`Dependency`]: crate::core::Dependency
 
-use crate::core::dependency::DepKind;
+use crate::core::dependency::{Artifact, DepKind};
 use crate::core::Dependency;
 use crate::core::{PackageId, SourceId, Summary};
 use crate::sources::registry::{LoadResponse, RegistryData};
 use crate::util::interning::InternedString;
 use crate::util::IntoUrl;
-use crate::util::{internal, CargoResult, Config, Filesystem, OptVersionReq, ToSemver};
+use crate::util::{internal, CargoResult, Config, Filesystem, OptVersionReq, PartialVersion};
 use anyhow::bail;
 use cargo_util::{paths, registry::make_dep_path};
 use semver::Version;
@@ -305,13 +305,16 @@ pub struct IndexPackage<'a> {
     ///
     /// Added in 2023 (see <https://github.com/rust-lang/crates.io/pull/6267>),
     /// can be `None` if published before then or if not set in the manifest.
-    rust_version: Option<InternedString>,
+    rust_version: Option<PartialVersion>,
     /// The schema version for this entry.
     ///
     /// If this is None, it defaults to version `1`. Entries with unknown
     /// versions are ignored.
     ///
     /// Version `2` schema adds the `features2` field.
+    ///
+    /// Version `3` schema adds `artifact`, `bindep_targes`, and `lib` for
+    /// artifact dependencies support.
     ///
     /// This provides a method to safely introduce changes to index entries
     /// and allow older versions of cargo to ignore newer entries it doesn't
@@ -356,6 +359,10 @@ struct RegistryDependency<'a> {
     ///
     /// [RFC 1977]: https://rust-lang.github.io/rfcs/1977-public-private-dependencies.html
     public: Option<bool>,
+    artifact: Option<Vec<Cow<'a, str>>>,
+    bindep_target: Option<Cow<'a, str>>,
+    #[serde(default)]
+    lib: bool,
 }
 
 impl<'cfg> RegistryIndex<'cfg> {
@@ -379,7 +386,9 @@ impl<'cfg> RegistryIndex<'cfg> {
     pub fn hash(&mut self, pkg: PackageId, load: &mut dyn RegistryData) -> Poll<CargoResult<&str>> {
         let req = OptVersionReq::exact(pkg.version());
         let summary = self.summaries(&pkg.name(), &req, load)?;
-        let summary = ready!(summary).next();
+        let summary = ready!(summary)
+            .filter(|s| s.summary.version() == pkg.version())
+            .next();
         Poll::Ready(Ok(summary
             .ok_or_else(|| internal(format!("no hash listed for {}", pkg)))?
             .summary
@@ -407,6 +416,8 @@ impl<'cfg> RegistryIndex<'cfg> {
     where
         'a: 'b,
     {
+        let bindeps = self.config.cli_unstable().bindeps;
+
         let source_id = self.source_id;
 
         // First up parse what summaries we have available.
@@ -432,7 +443,9 @@ impl<'cfg> RegistryIndex<'cfg> {
                 }
             })
             .filter(move |is| {
-                if is.v > INDEX_V_MAX {
+                if is.v == 3 && bindeps {
+                    true
+                } else if is.v > INDEX_V_MAX {
                     debug!(
                         "unsupported schema version {} ({} {})",
                         is.v,
@@ -567,20 +580,8 @@ impl<'cfg> RegistryIndex<'cfg> {
             .filter(|s| !s.yanked || yanked_whitelist.contains(&s.summary.package_id()))
             .map(|s| s.summary.clone());
 
-        // Handle `cargo update --precise` here. If specified, our own source
-        // will have a precise version listed of the form
-        // `<pkg>=<p_req>o-><f_req>` where `<pkg>` is the name of a crate on
-        // this source, `<p_req>` is the version installed and `<f_req> is the
-        // version requested (argument to `--precise`).
-        let precise = match source_id.precise() {
-            Some(p) if p.starts_with(name) && p[name.len()..].starts_with('=') => {
-                let mut vers = p[name.len() + 1..].splitn(2, "->");
-                let current_vers = vers.next().unwrap().to_semver().unwrap();
-                let requested_vers = vers.next().unwrap().to_semver().unwrap();
-                Some((current_vers, requested_vers))
-            }
-            _ => None,
-        };
+        // Handle `cargo update --precise` here.
+        let precise = source_id.precise_registry_version(name);
         let summaries = summaries.filter(|s| match &precise {
             Some((current, requested)) => {
                 if req.matches(current) {
@@ -623,10 +624,10 @@ impl<'cfg> RegistryIndex<'cfg> {
         load: &mut dyn RegistryData,
     ) -> Poll<CargoResult<bool>> {
         let req = OptVersionReq::exact(pkg.version());
-        let found = self
-            .summaries(&pkg.name(), &req, load)
-            .map_ok(|mut p| p.any(|summary| summary.yanked));
-        found
+        let found = ready!(self.summaries(&pkg.name(), &req, load))?
+            .filter(|s| s.summary.version() == pkg.version())
+            .any(|summary| summary.yanked);
+        Poll::Ready(Ok(found))
     }
 }
 
@@ -945,6 +946,9 @@ impl<'a> RegistryDependency<'a> {
             registry,
             package,
             public,
+            artifact,
+            bindep_target,
+            lib,
         } = self;
 
         let id = if let Some(registry) = &registry {
@@ -982,6 +986,11 @@ impl<'a> RegistryDependency<'a> {
         // In Cargo.toml, "registry" is None if it is from the default
         if !id.is_crates_io() {
             dep.set_registry_id(id);
+        }
+
+        if let Some(artifacts) = artifact {
+            let artifact = Artifact::parse(&artifacts, lib, bindep_target.as_deref())?;
+            dep.set_artifact(artifact);
         }
 
         dep.set_optional(optional)

@@ -84,6 +84,7 @@ use curl::easy::Easy;
 use lazycell::LazyCell;
 use serde::de::IntoDeserializer as _;
 use serde::Deserialize;
+use serde_untagged::UntaggedEnumVisitor;
 use time::OffsetDateTime;
 use toml_edit::Item;
 use url::Url;
@@ -938,6 +939,7 @@ impl Config {
                     .map(|s| (s.to_string(), def.clone())),
             );
         }
+        output.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(())
     }
 
@@ -2106,8 +2108,8 @@ impl ConfigValue {
 
     /// Merge the given value into self.
     ///
-    /// If `force` is true, primitive (non-container) types will override existing values.
-    /// If false, the original will be kept and the new value ignored.
+    /// If `force` is true, primitive (non-container) types will override existing values
+    /// of equal priority. For arrays, incoming values of equal priority will be placed later.
     ///
     /// Container types (tables and arrays) are merged with existing values.
     ///
@@ -2115,7 +2117,13 @@ impl ConfigValue {
     fn merge(&mut self, from: ConfigValue, force: bool) -> CargoResult<()> {
         match (self, from) {
             (&mut CV::List(ref mut old, _), CV::List(ref mut new, _)) => {
-                old.extend(mem::take(new).into_iter());
+                if force {
+                    old.append(new);
+                } else {
+                    new.append(old);
+                    mem::swap(new, old);
+                }
+                old.sort_by(|a, b| a.1.cmp(&b.1));
             }
             (&mut CV::Table(ref mut old, _), CV::Table(ref mut new, _)) => {
                 for (key, value) in mem::take(new) {
@@ -2446,11 +2454,22 @@ impl CargoFutureIncompatConfig {
 /// ssl-version.min = "tlsv1.2"
 /// ssl-version.max = "tlsv1.3"
 /// ```
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SslVersionConfig {
     Single(String),
     Range(SslVersionConfigRange),
+}
+
+impl<'de> Deserialize<'de> for SslVersionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .string(|single| Ok(SslVersionConfig::Single(single.to_owned())))
+            .map(|map| map.deserialize().map(SslVersionConfig::Range))
+            .deserialize(deserializer)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -2486,11 +2505,22 @@ pub struct CargoSshConfig {
 /// [build]
 /// jobs = "default" # Currently only support "default".
 /// ```
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum JobsConfig {
     Integer(i32),
     String(String),
+}
+
+impl<'de> Deserialize<'de> for JobsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .i32(|int| Ok(JobsConfig::Integer(int)))
+            .string(|string| Ok(JobsConfig::String(string.to_owned())))
+            .deserialize(deserializer)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2527,11 +2557,22 @@ pub struct BuildTargetConfig {
     inner: Value<BuildTargetConfigInner>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 enum BuildTargetConfigInner {
     One(String),
     Many(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for BuildTargetConfigInner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        UntaggedEnumVisitor::new()
+            .string(|one| Ok(BuildTargetConfigInner::One(one.to_owned())))
+            .seq(|many| many.deserialize().map(BuildTargetConfigInner::Many))
+            .deserialize(deserializer)
+    }
 }
 
 impl BuildTargetConfig {
@@ -2645,17 +2686,42 @@ where
     deserializer.deserialize_option(ProgressVisitor)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 enum EnvConfigValueInner {
     Simple(String),
     WithOptions {
         value: String,
-        #[serde(default)]
         force: bool,
-        #[serde(default)]
         relative: bool,
     },
+}
+
+impl<'de> Deserialize<'de> for EnvConfigValueInner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WithOptions {
+            value: String,
+            #[serde(default)]
+            force: bool,
+            #[serde(default)]
+            relative: bool,
+        }
+
+        UntaggedEnumVisitor::new()
+            .string(|simple| Ok(EnvConfigValueInner::Simple(simple.to_owned())))
+            .map(|map| {
+                let with_options: WithOptions = map.deserialize()?;
+                Ok(EnvConfigValueInner::WithOptions {
+                    value: with_options.value,
+                    force: with_options.force,
+                    relative: with_options.relative,
+                })
+            })
+            .deserialize(deserializer)
+    }
 }
 
 #[derive(Debug, Deserialize)]

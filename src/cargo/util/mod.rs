@@ -22,7 +22,7 @@ pub use self::progress::{Progress, ProgressStyle};
 pub use self::queue::Queue;
 pub use self::restricted_names::validate_package_name;
 pub use self::rustc::Rustc;
-pub use self::semver_ext::{OptVersionReq, VersionExt, VersionReqExt};
+pub use self::semver_ext::{OptVersionReq, PartialVersion, VersionExt, VersionReqExt};
 pub use self::to_semver::ToSemver;
 pub use self::vcs::{existing_vcs_repo, FossilRepo, GitRepo, HgRepo, PijulRepo};
 pub use self::workspace::{
@@ -65,6 +65,13 @@ pub mod toml;
 pub mod toml_mut;
 mod vcs;
 mod workspace;
+
+pub fn is_rustup() -> bool {
+    // ALLOWED: `RUSTUP_HOME` should only be read from process env, otherwise
+    // other tools may point to executables from incompatible distributions.
+    #[allow(clippy::disallowed_methods)]
+    std::env::var_os("RUSTUP_HOME").is_some()
+}
 
 pub fn elapsed(duration: Duration) -> String {
     let secs = duration.as_secs();

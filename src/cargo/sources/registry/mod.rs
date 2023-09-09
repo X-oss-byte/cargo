@@ -201,8 +201,10 @@ use tar::Archive;
 use tracing::debug;
 
 use crate::core::dependency::Dependency;
-use crate::core::source::MaybePackage;
-use crate::core::{Package, PackageId, QueryKind, Source, SourceId, Summary};
+use crate::core::{Package, PackageId, SourceId, Summary};
+use crate::sources::source::MaybePackage;
+use crate::sources::source::QueryKind;
+use crate::sources::source::Source;
 use crate::sources::PathSource;
 use crate::util::hex;
 use crate::util::network::PollExt;
@@ -251,7 +253,7 @@ pub struct RegistrySource<'cfg> {
     /// yanked.
     ///
     /// This is populated from the entries in `Cargo.lock` to ensure that
-    /// `cargo update -p somepkg` won't unlock yanked entries in `Cargo.lock`.
+    /// `cargo update somepkg` won't unlock yanked entries in `Cargo.lock`.
     /// Otherwise, the resolver would think that those entries no longer
     /// exist, and it would trigger updates to unrelated packages.
     yanked_whitelist: HashSet<PackageId>,
@@ -694,6 +696,7 @@ impl<'cfg> RegistrySource<'cfg> {
             .summaries(&package.name(), &req, &mut *self.ops)?
             .expect("a downloaded dep now pending!?")
             .map(|s| s.summary.clone())
+            .filter(|s| s.version() == package.version())
             .next()
             .expect("summary not found");
         if let Some(cksum) = summary_with_cksum.checksum() {
@@ -887,7 +890,7 @@ impl<'cfg> Source for RegistrySource<'cfg> {
 
 impl RegistryConfig {
     /// File name of [`RegistryConfig`].
-    const NAME: &str = "config.json";
+    const NAME: &'static str = "config.json";
 }
 
 /// Get the maximum upack size that Cargo permits
